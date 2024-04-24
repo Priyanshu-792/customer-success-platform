@@ -1,18 +1,22 @@
 ﻿using System.ComponentModel.DataAnnotations.Schema;
+using Promact.CustomerSuccess.Platform.Entities.Constants;
 using Volo.Abp.Domain.Entities.Auditing;
+using Volo.Abp.Identity;
 
 namespace Promact.CustomerSuccess.Platform.Entities
 {
-    public class EscalationMatrix : AuditedAggregateRootWithUser<Guid, ApplicationUser>
-    {        
+    public class EscalationMatrix : AuditedEntity<Guid>
+    {
+        
         public EscalationMatrixLevels Level { get; set; }
-        public EscalationType EscalationType { get; set; }        
+        public EscalationType EscalationType { get; set; }     
+        
         [ForeignKey("Project")]
         public required Guid ProjectId { get; set; }
+
+        [ForeignKey((nameof(ResponsiblePerson)))]
+        public Guid ResponsiblePersonId { get; set; }
         public virtual Project? Project { get; set; }        
-        public override object?[] GetKeys()
-        {
-            throw new NotImplementedException();
-        }
+        public virtual IdentityUser? ResponsiblePerson { get; set; }  
     }
 }

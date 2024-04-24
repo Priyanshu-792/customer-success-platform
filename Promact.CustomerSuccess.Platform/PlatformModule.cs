@@ -1,4 +1,4 @@
-﻿using Microsoft.AspNetCore.Cors;
+using Microsoft.AspNetCore.Cors;
 using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
@@ -47,8 +47,24 @@ using Volo.Abp.Security.Claims;
 using Volo.Abp.UI.Navigation.Urls;
 using Volo.Abp.Validation.Localization;
 using Volo.Abp.VirtualFileSystem;
-using Volo.Abp.AspNetCore.Authentication.OpenIdConnect;
-using Autofac.Core;
+
+using Promact.CustomerSuccess.Platform.Services.Emailing;
+using Microsoft.EntityFrameworkCore;
+using Serilog;
+using System.Security.Cryptography.X509Certificates;
+using System.Security.Cryptography;
+using Microsoft.IdentityModel.Tokens;
+using System.Text;
+using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Promact.CustomerSuccess.Platform.Constants;
+using Promact.CustomerSuccess.Platform.Services.Uttils;
+using Promact.CustomerSuccess.Platform.Entities;
+using Microsoft.AspNetCore.Identity;
+using Microsoft.IdentityModel.Protocols.OpenIdConnect;
+using Microsoft.AspNetCore.Authentication;
+using Microsoft.AspNetCore.Authentication.OAuth.Claims;
+using Microsoft.OpenApi.Writers;
+
 
 namespace Promact.CustomerSuccess.Platform;
 
@@ -99,6 +115,7 @@ namespace Promact.CustomerSuccess.Platform;
     typeof(AbpSettingManagementEntityFrameworkCoreModule),
     typeof(AbpSettingManagementHttpApiModule)
 )]
+[DependsOn(typeof(AbpEmailingModule))]
 public class PlatformModule : AbpModule
 {
     /* Single point to enable/disable multi-tenancy */
@@ -108,12 +125,23 @@ public class PlatformModule : AbpModule
     {
         var hostingEnvironment = context.Services.GetHostingEnvironment();
         var configuration = context.Services.GetConfiguration();
+        context.Services.AddTransient<IHttpContextAccessor, HttpContextAccessor>();
+        context.Services.AddScoped<IEmailService, EmailService>();
+        context.Services.AddHttpClient();
 
         context.Services.PreConfigure<AbpMvcDataAnnotationsLocalizationOptions>(options =>
         {
             options.AddAssemblyResource(
                 typeof(PlatformResource)
             );
+        });
+
+        context.Services.AddCors(options =>
+        {
+            options.AddPolicy("AllowOrigin",
+                builder => builder.AllowAnyOrigin()
+                                  .AllowAnyMethod()
+                                  .AllowAnyHeader());
         });
 
         PreConfigure<OpenIddictBuilder>(builder =>
@@ -135,7 +163,11 @@ public class PlatformModule : AbpModule
 
             PreConfigure<OpenIddictServerBuilder>(serverBuilder =>
             {
-                serverBuilder.AddProductionEncryptionAndSigningCertificate("openiddict.pfx", "a2a5a8af-14c6-4374-a8f3-908165814c47");
+                //serverBuilder.AddProductionEncryptionAndSigningCertificate("openiddict.pfx", "a2a5a8af-14c6-4374-a8f3-908165814c47");
+                serverBuilder.AddEncryptionCertificate(
+                    GetEncryptionCertificate(hostingEnvironment, context.Services.GetConfiguration()));
+                serverBuilder.AddSigningCertificate(
+                        GetSigningCertificate(hostingEnvironment, context.Services.GetConfiguration()));
             });
         }
     }
@@ -144,13 +176,15 @@ public class PlatformModule : AbpModule
     {
         var hostingEnvironment = context.Services.GetHostingEnvironment();
         var configuration = context.Services.GetConfiguration();
-
+        context.Services.AddScoped<IUttilService, UttillService>();
         if (hostingEnvironment.IsDevelopment())
         {
             context.Services.Replace(ServiceDescriptor.Singleton<IEmailSender, NullEmailSender>());
         }
 
+    
         ConfigureAuthentication(context, configuration);
+        ConfigureAuthorization(context);
         ConfigureBundles();
         ConfigureMultiTenancy();
         ConfigureUrls(configuration);
@@ -164,20 +198,34 @@ public class PlatformModule : AbpModule
         ConfigureEfCore(context);
     }
 
+
     private void ConfigureAuthentication(ServiceConfigurationContext context, IConfiguration configuration)
     {
         context.Services.ForwardIdentityAuthenticationForBearer(OpenIddictValidationAspNetCoreDefaults.AuthenticationScheme);
-        context.Services.AddAuthentication()
+        context.Services.AddAuthentication(options =>
+        {
+            options.DefaultAuthenticateScheme = JwtBearerDefaults.AuthenticationScheme;
+            options.DefaultChallengeScheme = JwtBearerDefaults.AuthenticationScheme;
+        })
             .AddJwtBearer(options =>
             {
                 options.Authority = configuration["AuthServer:Authority"];
                 options.RequireHttpsMetadata = Convert.ToBoolean(configuration["AuthServer:RequireHttpsMetadata"]);
                 options.Audience = "KeycloakDemo";
+                options.RequireHttpsMetadata = false;
+                options.SaveToken = true;
+                options.TokenValidationParameters = new TokenValidationParameters
+                {
+
+                    ValidateIssuerSigningKey = true,
+                    IssuerSigningKey = new SymmetricSecurityKey(Encoding.ASCII.GetBytes(configuration["jwt:Key"])),
+                    ValidateIssuer = false,
+                    ValidateAudience = false
+                };
             })
             .AddAbpOpenIdConnect(options =>
             {
                 options.Authority = configuration["AuthServer:Authority"];
-
                 options.RequireHttpsMetadata = Convert.ToBoolean(configuration["AuthServer:RequireHttpsMetadata"]);
                 options.ResponseType = OpenIdConnectResponseType.Code;
                 options.UsePkce = true;
@@ -195,7 +243,6 @@ public class PlatformModule : AbpModule
                  * What I've done here will be built-in with ABP v5.3.0 (then we can delete the following code)
                  * https://github.com/abpframework/abp/pull/12085
                  */
-
                 if (AbpClaimTypes.Name != "given_name")
                 {
                     options.ClaimActions.MapJsonKey(AbpClaimTypes.Name, "given_name");
@@ -214,6 +261,320 @@ public class PlatformModule : AbpModule
         {
             options.IsDynamicClaimsEnabled = true;
         });
+    }
+
+
+    private void ConfigureAuthorization(ServiceConfigurationContext context)
+    {
+        context.Services.AddAuthorization(options =>
+        {
+            // Project policies
+            options.AddPolicy(PolicyName.ProjectCreatePolicy, policy =>
+            {
+                policy.RequireRole("admin", "auditor");
+            });
+            options.AddPolicy(PolicyName.ProjectUpdatePolicy, policy =>
+            {
+                policy.RequireRole("admin", "auditor");
+            });
+            options.AddPolicy(PolicyName.ProjectDeletePolicy, policy =>
+            {
+                policy.RequireRole("admin", "auditor");
+            });
+
+
+            // User policies
+            options.AddPolicy(PolicyName.UserGetPolicy, policy =>
+            {
+                policy.RequireRole("admin");
+            });
+            options.AddPolicy(PolicyName.UserCreatePolicy, policy =>
+            {
+                policy.RequireRole("admin");
+            });
+            options.AddPolicy(PolicyName.UserUpdatePolicy, policy =>
+            {
+                policy.RequireRole("admin");
+            });
+            options.AddPolicy(PolicyName.UserDeletePolicy, policy =>
+            {
+                policy.RequireRole("admin");
+            });
+
+            // Role policies
+            options.AddPolicy(PolicyName.RoleGetPolicy, policy =>
+            {
+                policy.RequireRole("admin");
+            });
+            options.AddPolicy(PolicyName.RoleCreatePolicy, policy =>
+            {
+                policy.RequireRole("admin");
+            });
+            options.AddPolicy(PolicyName.RoleUpdatePolicy, policy =>
+            {
+                policy.RequireRole("admin");
+            });
+            options.AddPolicy(PolicyName.RoleDeletePolicy, policy =>
+            {
+                policy.RequireRole("admin");
+            });
+            options.AddPolicy(PolicyName.AssignRolePolicy, policy =>
+            {
+                policy.RequireRole("admin","manager");
+            });
+
+
+            // Policies for creating individual resources
+            options.AddPolicy(PolicyName.ProjectBudgetCreatePolicy, policy =>
+            {
+                policy.RequireRole("admin", "manager");
+            });
+
+            options.AddPolicy(PolicyName.ProjectBudgetUpdatePolicy, policy =>
+            {
+                policy.RequireRole("admin", "manager");
+            });
+            options.AddPolicy(PolicyName.ProjectBudgetDeletePolicy, policy =>
+            {
+                policy.RequireRole("admin", "manager");
+            });
+
+
+            //Sprint Policies
+
+            options.AddPolicy(PolicyName.SprintCreatePolicy, policy =>
+        {
+            policy.RequireRole("admin", "manager");
+        });
+            options.AddPolicy(PolicyName.SprintUpdatePolicy, policy =>
+            {
+                policy.RequireRole("admin", "manager");
+            });
+            options.AddPolicy(PolicyName.SprintDeletePolicy, policy =>
+            {
+                policy.RequireRole("admin", "manager");
+            });
+
+            //Version History Policy
+
+
+            options.AddPolicy(PolicyName.VersionHistoryCreatePolicy, policy =>
+            {
+                policy.RequireRole("admin", "manager");
+            });
+
+            options.AddPolicy(PolicyName.VersionHistoryUpdatePolicy, policy =>
+            {
+                policy.RequireRole("admin", "manager");
+            });
+
+
+            options.AddPolicy(PolicyName.VersionHistoryDeletePolicy, policy =>
+            {
+                policy.RequireRole("admin", "manager");
+            });
+
+
+            //Audit History Policy
+
+            options.AddPolicy(PolicyName.AuditHistoryCreatePolicy, policy =>
+        {
+            policy.RequireRole("admin", "auditor");
+        });
+
+
+            options.AddPolicy(PolicyName.AuditHistoryUpdatePolicy, policy =>
+            {
+                policy.RequireRole("admin", "auditor");
+            });
+
+
+            options.AddPolicy(PolicyName.AuditHistoryDeletePolicy, policy =>
+            {
+                policy.RequireRole("admin", "auditor");
+            });
+
+            //Client Feedback Delete Plolicy
+
+            options.AddPolicy(PolicyName.ClientFeedbackCreatePolicy, policy =>
+        {
+            policy.RequireRole("admin", "manager");
+        });
+
+
+            options.AddPolicy(PolicyName.ClientFeedbackUpdatePolicy, policy =>
+            {
+                policy.RequireRole("admin", "manager");
+            });
+            options.AddPolicy(PolicyName.ClientFeedbackDeletePolicy, policy =>
+            {
+                policy.RequireRole("admin", "manager");
+            });
+
+
+
+            //Minite meeting policy
+            options.AddPolicy(PolicyName.MinuteMeetingCreatePolicy, policy =>
+        {
+            policy.RequireRole("admin", "auditor");
+        });
+
+            options.AddPolicy(PolicyName.MinuteMeetingUpdatePolicy, policy =>
+            {
+                policy.RequireRole("admin", "manager");
+            });
+
+            options.AddPolicy(PolicyName.MinuteMeetingDeletePolicy, policy =>
+            {
+                policy.RequireRole("admin", "manager");
+            });
+
+
+            //Policy for Risk profile
+
+            options.AddPolicy(PolicyName.RiskProfileCreatePolicy, policy =>
+        {
+            policy.RequireRole("admin", "manager");
+        });
+            options.AddPolicy(PolicyName.RiskProfileUpdatePolicy, policy =>
+            {
+                policy.RequireRole("admin", "manager");
+            });
+
+
+            options.AddPolicy(PolicyName.RiskProfileDeletePolicy, policy =>
+            {
+                policy.RequireRole("admin", "manager");
+            });
+
+            //Resource Policy
+
+
+            options.AddPolicy(PolicyName.ResourceCreatePolicy, policy =>
+        {
+            policy.RequireRole("admin", "manager");
+        });
+            options.AddPolicy(PolicyName.ResourceUpdatePolicy, policy =>
+            {
+                policy.RequireRole("admin", "manager");
+            });
+            options.AddPolicy(PolicyName.ResourceDeletePolicy, policy =>
+            {
+                policy.RequireRole("admin", "manager");
+            });
+
+
+            //Stakeholder Policy
+
+            options.AddPolicy(PolicyName.StakeholderCreatePolicy, policy =>
+        {
+            policy.RequireRole("admin", "manager");
+        });
+            options.AddPolicy(PolicyName.StakeholderUpdatePolicy, policy =>
+            {
+                policy.RequireRole("admin", "manager");
+            });
+
+            options.AddPolicy(PolicyName.StakeholderDeletePolicy, policy =>
+            {
+                policy.RequireRole("admin", "manager");
+            });
+
+
+            //EscalationMatrix Policy
+
+            options.AddPolicy(PolicyName.EscalationMatrixCreatePolicy, policy =>
+        {
+            policy.RequireRole("admin", "manager");
+        });
+
+            options.AddPolicy(PolicyName.EscalationMatrixUpdatePolicy, policy =>
+            {
+                policy.RequireRole("admin", "manager");
+            });
+
+
+            options.AddPolicy(PolicyName.EscalationMatrixDeletePolicy, policy =>
+            {
+                policy.RequireRole("admin", "manager");
+            });
+
+            //ApprovedTeam Policy
+            options.AddPolicy(PolicyName.ApproveTeamCreatePolicy, policy =>
+        {
+            policy.RequireRole("admin", "manager");
+        });
+            options.AddPolicy(PolicyName.ApproveTeamUpdatePolicy, policy =>
+            {
+                policy.RequireRole("admin", "manager");
+            });
+
+            options.AddPolicy(PolicyName.ApproveTeamDeletePolicy, policy =>
+            {
+                policy.RequireRole("admin", "manager");
+            });
+        });
+    }
+
+
+    private X509Certificate2 GetSigningCertificate(IWebHostEnvironment hostingEnv,
+                            IConfiguration configuration)
+    {
+        var fileName = $"cert-signing.pfx";
+        var passPhrase = configuration["MyAppCertificate:X590:PassPhrase"];
+        var file = Path.Combine(hostingEnv.ContentRootPath, fileName);
+        if (File.Exists(file))
+        {
+            var created = File.GetCreationTime(file);
+            var days = (DateTime.Now - created).TotalDays;
+            if (days > 180)
+                File.Delete(file);
+            else
+                return new X509Certificate2(file, passPhrase,
+                             X509KeyStorageFlags.MachineKeySet);
+        }
+        // file doesn't exist or was deleted because it expired
+        using var algorithm = RSA.Create(keySizeInBits: 2048);
+        var subject = new X500DistinguishedName("CN=Fabrikam Signing Certificate");
+        var request = new CertificateRequest(subject, algorithm,
+                            HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+        request.CertificateExtensions.Add(new X509KeyUsageExtension(
+                            X509KeyUsageFlags.DigitalSignature, critical: true));
+        var certificate = request.CreateSelfSigned(DateTimeOffset.UtcNow,
+                            DateTimeOffset.UtcNow.AddYears(2));
+        File.WriteAllBytes(file, certificate.Export(X509ContentType.Pfx, string.Empty));
+        return new X509Certificate2(file, passPhrase,
+                            X509KeyStorageFlags.MachineKeySet);
+    }
+
+    private X509Certificate2 GetEncryptionCertificate(IWebHostEnvironment hostingEnv,
+                                 IConfiguration configuration)
+    {
+        var fileName = $"cert-encryption.pfx";
+        var passPhrase = configuration["MyAppCertificate:X590:PassPhrase"];
+        var file = Path.Combine(hostingEnv.ContentRootPath, fileName);
+        if (File.Exists(file))
+        {
+            var created = File.GetCreationTime(file);
+            var days = (DateTime.Now - created).TotalDays;
+            if (days > 180)
+                File.Delete(file);
+            else
+                return new X509Certificate2(file, passPhrase,
+                                X509KeyStorageFlags.MachineKeySet);
+        }
+
+        // file doesn't exist or was deleted because it expired
+        using var algorithm = RSA.Create(keySizeInBits: 2048);
+        var subject = new X500DistinguishedName("CN=Fabrikam Encryption Certificate");
+        var request = new CertificateRequest(subject, algorithm,
+                            HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+        request.CertificateExtensions.Add(new X509KeyUsageExtension(
+                            X509KeyUsageFlags.KeyEncipherment, critical: true));
+        var certificate = request.CreateSelfSigned(DateTimeOffset.UtcNow,
+                            DateTimeOffset.UtcNow.AddYears(2));
+        File.WriteAllBytes(file, certificate.Export(X509ContentType.Pfx, string.Empty));
+        return new X509Certificate2(file, passPhrase, X509KeyStorageFlags.MachineKeySet);
     }
 
     private void ConfigureBundles()
@@ -313,13 +674,37 @@ public class PlatformModule : AbpModule
             configuration["AuthServer:Authority"]!,
             new Dictionary<string, string>
             {
-                    {"Platform", "Platform API"}
+            {"Platform", "Platform API"}
             },
             options =>
             {
                 options.SwaggerDoc("v1", new OpenApiInfo { Title = "Platform API", Version = "v1" });
                 options.DocInclusionPredicate((docName, description) => true);
                 options.CustomSchemaIds(type => type.FullName);
+
+                // Define security scheme for bearer token
+                options.AddSecurityDefinition("Bearer", new OpenApiSecurityScheme
+                {
+                    Description = "JWT Authorization header using the Bearer scheme. Example: 'Bearer {token}'",
+                    Type = SecuritySchemeType.Http,
+                    Scheme = "bearer"
+                });
+
+                // Add JWT bearer token authentication requirement
+                options.AddSecurityRequirement(new OpenApiSecurityRequirement
+                {
+                {
+                    new OpenApiSecurityScheme
+                    {
+                        Reference = new OpenApiReference
+                        {
+                            Type = ReferenceType.SecurityScheme,
+                            Id = "Bearer"
+                        }
+                    },
+                    new List<string>()
+                }
+                });
             });
     }
 
@@ -340,6 +725,7 @@ public class PlatformModule : AbpModule
     {
         context.Services.AddCors(options =>
         {
+
             options.AddDefaultPolicy(builder =>
             {
                 builder
@@ -382,9 +768,9 @@ public class PlatformModule : AbpModule
             });
         });
 
-    }
 
-    public override void OnApplicationInitialization(ApplicationInitializationContext context)
+    }
+    public override async void OnApplicationInitialization(ApplicationInitializationContext context)
     {
         var app = context.GetApplicationBuilder();
         var env = context.GetEnvironment();
@@ -392,14 +778,13 @@ public class PlatformModule : AbpModule
         if (env.IsDevelopment())
         {
             app.UseDeveloperExceptionPage();
+            app.UseCors("AllowOrigin");
         }
 
         app.UseAbpRequestLocalization();
 
-        if (!env.IsDevelopment())
-        {
-            app.UseErrorPage();
-        }
+
+        
 
         app.UseCorrelationId();
         app.UseStaticFiles();
@@ -412,6 +797,7 @@ public class PlatformModule : AbpModule
         {
             app.UseMultiTenancy();
         }
+
 
         app.UseUnitOfWork();
         app.UseDynamicClaims();
@@ -430,5 +816,6 @@ public class PlatformModule : AbpModule
         app.UseAuditing();
         app.UseAbpSerilogEnrichers();
         app.UseConfiguredEndpoints();
+       
     }
 }

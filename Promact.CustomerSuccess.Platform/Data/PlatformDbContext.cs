@@ -1,9 +1,13 @@
-﻿using Microsoft.EntityFrameworkCore;
+﻿using Microsoft.AspNetCore.Identity.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore;
 using Promact.CustomerSuccess.Platform.Entities;
+using System.Reflection.Emit;
 using Volo.Abp.AuditLogging.EntityFrameworkCore;
+using Volo.Abp.Data;
 using Volo.Abp.EntityFrameworkCore;
 using Volo.Abp.EntityFrameworkCore.Modeling;
 using Volo.Abp.FeatureManagement.EntityFrameworkCore;
+using Volo.Abp.Identity;
 using Volo.Abp.Identity.EntityFrameworkCore;
 using Volo.Abp.OpenIddict.EntityFrameworkCore;
 using Volo.Abp.PermissionManagement.EntityFrameworkCore;
@@ -19,10 +23,13 @@ public class PlatformDbContext : AbpDbContext<PlatformDbContext>
     {
     }
 
+    public DbSet<ProjectResources> Resources { get; set; } 
+    public DbSet<ProjectUpdate> ProjectUpdate { get; set; }
+    public DbSet<ApprovedTeam> ApprovedTeams { get; set; }
+    public DbSet<Stakeholder> Stakeholders { get; set; }
+    public DbSet<VersionHistory> VersionHistories { get; set; }
+    public DbSet<AuditHistory> AuditHistories { get; set; }
     public DbSet<Project> Projects { get; set; }
-    public DbSet<Document> Documents { get; set; }
-    public DbSet<DocumentVersion> DocumentVersions { get; set; }
-    public DbSet<Organization> Organizations { get; set; }
     public DbSet<ClientFeedback> ClientFeedbacks { get; set; }
     public DbSet<ProjectBudget> ProjectBudgets { get; set; }
     public DbSet<PhaseMilestone> PhaseMilestones { get; set; }
@@ -31,8 +38,6 @@ public class PlatformDbContext : AbpDbContext<PlatformDbContext>
     public DbSet<MeetingMinute> MeetingMinutes { get; set; }
     public DbSet<EscalationMatrix> EscalationMatrices { get; set; }
     public DbSet<Sprint> Sprints { get; set; }
-    public DbSet<ApplicationUser> Users { get; set; }
-
 
     protected override void OnModelCreating(ModelBuilder builder)
     {
@@ -49,25 +54,33 @@ public class PlatformDbContext : AbpDbContext<PlatformDbContext>
         builder.ConfigureTenantManagement();
 
         /* Configure your own entities here */
-        builder.Entity<DocumentVersion>(entity =>
-        {                        
-            entity.ConfigureByConvention();
+        builder.Entity<ProjectResources>(resouces =>
+        {
+            resouces.ConfigureByConvention();
         });
+        builder.Entity<ProjectUpdate>(projectUpdate =>
+        {
+            projectUpdate.ConfigureByConvention();
+        });
+        builder.Entity<ApprovedTeam>(approveTeam =>
+        {
+            approveTeam.ConfigureByConvention();
+        });
+        builder.Entity<AuditHistory>(auditHistory =>
+        {
+            auditHistory.HasOne(a => a.Reviewer)
+                .WithMany()
+                .HasForeignKey(a => a.ReviewerId);
+            auditHistory.ConfigureByConvention();
+        });
+
         builder.Entity<EscalationMatrix>(EscalationMatrix =>
-        {            
+        {
             EscalationMatrix.ConfigureByConvention();
         });
         builder.Entity<MeetingMinute>(MeetingMinute =>
-        {            
+        {
             MeetingMinute.ConfigureByConvention();
-        });
-        builder.Entity<Organization>(Organization =>
-        {
-            Organization.ConfigureByConvention();
-        });
-        builder.Entity<Project>(Project =>
-        {
-            Project.ConfigureByConvention();
         });
         builder.Entity<ProjectBudget>(ProjectBudget =>
         {
@@ -93,14 +106,9 @@ public class PlatformDbContext : AbpDbContext<PlatformDbContext>
         {
             ClientFeedback.ConfigureByConvention();
         });
-        builder.Entity<Document>(Document =>
-        {
-            Document.ConfigureByConvention();
-        });
-        builder.Entity<ApplicationUser>(ApplicationUser =>
-        {
-            ApplicationUser.ConfigureByConvention();
-        });
+
+
+   
 
 
     }
